@@ -85,6 +85,7 @@ class ProductionCell:
     cell_id: str
     intent_id: str
     public_release: bool = False
+    required_gate_ids: tuple[str, ...] = ()
     state: CellState = CellState.PLANNED
     gate_results: list[GateResult] = field(default_factory=list)
     rights: RightsObject | None = None
@@ -100,8 +101,13 @@ class ProductionCell:
         self.state = CellState.WAITING_FOR_ASSURANCE
 
     def record_gate(self, result: GateResult) -> None:
-        if self.state not in {CellState.WAITING_FOR_ASSURANCE, CellState.BLOCKED}:
+        if self.state not in {
+            CellState.WAITING_FOR_ASSURANCE,
+            CellState.BLOCKED,
+            CellState.VERIFIED,
+        }:
             raise ValueError("gate results may only be recorded during assurance")
+        self.gate_results = [g for g in self.gate_results if g.gate_id != result.gate_id]
         self.gate_results.append(result)
         self.state = self._assurance_state()
 
@@ -120,12 +126,13 @@ class ProductionCell:
     def accept_risk(self, receipt: OverrideReceipt) -> None:
         failed = {g.gate_id for g in self.gate_results if g.verdict == Verdict.FAIL}
         unavailable = {g.gate_id for g in self.gate_results if g.verdict == Verdict.UNAVAILABLE}
-        open_risks = failed | unavailable
+        reported = {g.gate_id for g in self.gate_results}
+        missing_reports = set(self.required_gate_ids) - reported
+        open_risks = failed | unavailable | missing_reports
         missing = open_risks - set(receipt.accepted_risks)
         if missing:
             raise ValueError("override does not cover risks: " + ", ".join(sorted(missing)))
 
-        # Rights/provenance is not overrideable by a throughput or quality exception.
         if self.public_release:
             if self.rights is None or self.rights.validate_public_release():
                 raise ValueError("rights/provenance failures cannot be overridden")
@@ -153,6 +160,9 @@ class ProductionCell:
         if any(g.verdict == Verdict.FAIL for g in self.gate_results):
             return CellState.BLOCKED
         if any(g.verdict == Verdict.UNAVAILABLE for g in self.gate_results):
+            return CellState.WAITING_FOR_ASSURANCE
+        reported = {g.gate_id for g in self.gate_results}
+        if set(self.required_gate_ids) - reported:
             return CellState.WAITING_FOR_ASSURANCE
         return CellState.VERIFIED
 
